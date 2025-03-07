@@ -1,0 +1,27 @@
+#+title: README
+#+author: Vedant Pandey
+
+* What is this
+  I've created this hobby project to attempt to create a mock stock exchange to understand and build deeper understanding of how exchanges work
+
+* Goals
+
+** InProgress Web client to serve the scrip information
+
+*** Http server
+
+*** Reverse proxy
+
+*** Containerization for local e2e testing
+ 
+** Todo Backend process to generate scrip data
+
+** Todo Use seed based random data generation
+
+** Todo Simulation testing
+
+** Todo Benchmarking
+
+** Unplanned Build simulated dependence on scrips
+
+** Unplanned User interaction for buy/sell transaction
