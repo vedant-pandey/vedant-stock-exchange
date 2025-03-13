@@ -1,46 +1,47 @@
-//! By convention, main.zig is where your main function lives in the case that
-//! you are building an executable. If you are making a library, the convention
-//! is to delete this file and start with root.zig instead.
+const std = @import("std");
+const posix = std.posix;
+const log = std.log;
+
+const QUEUE_SIZE = 10;
+const READ_BUFFER_SIZE = 4 * 1024;
+const MAX_CONNECTIONS = 256;
 
 pub fn main() !void {
-    // Prints to stderr (it's a shortcut based on `std.io.getStdErr()`)
-    std.debug.print("All your {s} are belong to us.\n", .{"codebase"});
+    const listen_socket = try posix.socket(posix.AF.INET, posix.SOCK.STREAM, 0);
+    log.debug("Socket created {}\n", .{listen_socket});
 
-    // stdout is for the actual output of your application, for example if you
-    // are implementing gzip, then only the compressed bytes should be sent to
-    // stdout, not any debugging messages.
-    const stdout_file = std.io.getStdOut().writer();
-    var bw = std.io.bufferedWriter(stdout_file);
-    const stdout = bw.writer();
+    var read_buffer: [READ_BUFFER_SIZE]u8 = [_]u8{0} ** READ_BUFFER_SIZE;
 
-    try stdout.print("Run `zig build test` to run the tests.\n", .{});
+    const opt: u32 = 1;
+    try posix.setsockopt(listen_socket, posix.SOL.SOCKET, posix.SO.REUSEADDR, std.mem.asBytes(&opt));
 
-    try bw.flush(); // Don't forget to flush!
-}
-
-test "simple test" {
-    var list = std.ArrayList(i32).init(std.testing.allocator);
-    defer list.deinit(); // Try commenting this out and see if zig detects the memory leak!
-    try list.append(42);
-    try std.testing.expectEqual(@as(i32, 42), list.pop());
-}
-
-test "use other module" {
-    try std.testing.expectEqual(@as(i32, 150), lib.add(100, 50));
-}
-
-test "fuzz example" {
-    const Context = struct {
-        fn testOne(context: @This(), input: []const u8) anyerror!void {
-            _ = context;
-            // Try passing `--fuzz` to `zig build test` and see if it manages to fail this test case!
-            try std.testing.expect(!std.mem.eql(u8, "canyoufindme", input));
-        }
+    const server_addr_in: posix.sockaddr.in = posix.sockaddr.in{
+        .port = std.mem.nativeTo(u16, 3000, std.builtin.Endian.big),
+        .addr = 0,
     };
-    try std.testing.fuzz(Context{}, Context.testOne, .{});
+
+    var client_addr_in: posix.sockaddr.in = undefined;
+    var client_addr_len: posix.socklen_t = @sizeOf(posix.sockaddr.in);
+
+    try posix.bind(listen_socket, @as(*const posix.sockaddr, @ptrCast(&server_addr_in)), @sizeOf(posix.sockaddr.in));
+    try posix.listen(listen_socket, QUEUE_SIZE);
+    while (true) {
+        const client_fd = posix.accept(listen_socket, @as(*posix.sockaddr, @ptrCast(&client_addr_in)), &client_addr_len, 0) catch |err| {
+            log.err("Error while attempting to accept connection from client, err {}", .{err});
+            continue;
+        };
+
+        const bytes_read = posix.read(client_fd, &read_buffer) catch |err| {
+            log.err("Error while reading buffer {}, err {}", .{ client_fd, err });
+            continue;
+        };
+
+        log.debug("Bytes read {}, data {s}", .{ bytes_read, read_buffer });
+
+        log.debug("Telling client {} that it is kewl", .{client_fd});
+        _ = posix.write(client_fd, "kewl dude!") catch |err| {
+            log.err("Error while responding to client {}, err {}", .{client_fd, err});
+        };
+        posix.close(client_fd);
+    }
 }
-
-const std = @import("std");
-
-/// This imports the separate module containing `root.zig`. Take a look in `build.zig` for details.
-const lib = @import("vedant_stock_exchange_lib");
