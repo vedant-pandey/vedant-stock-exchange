@@ -2,10 +2,15 @@ const std = @import("std");
 const posix = std.posix;
 const log = std.log.scoped(.main);
 
-const QUEUE_SIZE = 10;
-const READ_BUFFER_SIZE = 4 * 1024;
+const QUEUE_SIZE = 128; // Increased from 10
+const READ_BUFFER_SIZE = 16 * 1024; // Increased from 4K
 const MAX_CONNECTIONS = 1000;
 const PORT = 3000;
+const POLL_TIMEOUT_MS = 100; // Add timeout instead of infinite wait
+
+// Pre-computed HTTP response headers
+const HTTP_RESPONSE_PREFIX = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: ";
+const HTTP_RESPONSE_SUFFIX = "\r\nConnection: keep-alive\r\n\r\n";
 
 const ConnectionState = enum {
     NEW,
@@ -17,10 +22,15 @@ const ClientState = struct {
     fd: i32 = -1,
     state: ConnectionState = ConnectionState.NEW,
     buffer: [READ_BUFFER_SIZE]u8 = undefined,
+    last_activity: i64 = 0, // For timeout management
 };
 
 var ClientsMAL = std.MultiArrayList(ClientState){};
 var memoryBuffer: [MAX_CONNECTIONS * @sizeOf(ClientState)]u8 = undefined;
+
+// Add arena allocator for temporary allocations
+var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+const allocator = gpa.allocator();
 
 const VSESystemError = error{
     ClientMultiArrayInitFailed,
@@ -36,6 +46,7 @@ const VSEConnectionError = error{
 };
 
 fn findFreeSlot() VSEConnectionError!usize {
+    // Use bitmap or free list for faster slot finding
     for (ClientsMAL.items(.fd), 0..) |fd, i| {
         if (fd == -1) return i;
     }
@@ -43,6 +54,7 @@ fn findFreeSlot() VSEConnectionError!usize {
 }
 
 fn findSlotByFd(fd: i32) VSESystemError!usize {
+    // Consider using a hashmap for O(1) lookup instead of O(n)
     for (ClientsMAL.items(.fd), 0..) |clientfd, i| {
         if (clientfd == fd) {
             return i;
@@ -79,7 +91,7 @@ fn initClientsMAL() VSESystemError!void {
     }
 }
 
-// Utility function to get human-readable IP address (kept for potential future use)
+// Utility function to get human-readable IP address
 fn getIpAddr(bigEndianAddr: u32) [4]u8 {
     const a: u8 = @truncate((bigEndianAddr >> 24) & 0xFF);
     const b: u8 = @truncate((bigEndianAddr >> 16) & 0xFF);
@@ -94,20 +106,61 @@ fn disconnectClient(slot: usize) void {
     ClientsMAL.items(.state)[slot] = ConnectionState.DISCONNECTED;
 }
 
+// Optimized to reduce string formatting overhead
 fn respondClient(slot: usize, bytes_read: usize) void {
-    var responseBuffer: [READ_BUFFER_SIZE + 100]u8 = undefined; // Extra space for headers
+    const fd = ClientsMAL.items(.fd)[slot];
 
-    // Create a basic HTTP response
-    const response = std.fmt.bufPrint(&responseBuffer, "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n{s}", .{
-        bytes_read,
-        ClientsMAL.items(.buffer)[slot][0..bytes_read],
-    }) catch |err| {
-        log.err("Error formatting HTTP response: {}", .{err});
-        return;
-    };
-    _ = posix.write(ClientsMAL.items(.fd)[slot], response) catch |err| {
+    // Pre-allocate a single buffer for headers and content
+    var responseBuffer: [READ_BUFFER_SIZE + 256]u8 = undefined;
+
+    // Format the Content-Length part
+    var lenBuf: [16]u8 = undefined;
+    const lenStr = std.fmt.bufPrint(&lenBuf, "{d}", .{bytes_read}) catch return;
+
+    // Copy prefix
+    var pos: usize = 0;
+    @memcpy(responseBuffer[pos .. pos + HTTP_RESPONSE_PREFIX.len], HTTP_RESPONSE_PREFIX);
+    pos += HTTP_RESPONSE_PREFIX.len;
+
+    // Copy content length
+    @memcpy(responseBuffer[pos .. pos + lenStr.len], lenStr);
+    pos += lenStr.len;
+
+    // Copy suffix
+    @memcpy(responseBuffer[pos .. pos + HTTP_RESPONSE_SUFFIX.len], HTTP_RESPONSE_SUFFIX);
+    pos += HTTP_RESPONSE_SUFFIX.len;
+
+    // Copy message body
+    @memcpy(responseBuffer[pos .. pos + bytes_read], ClientsMAL.items(.buffer)[slot][0..bytes_read]);
+    pos += bytes_read;
+
+    // Use writev to send in one syscall (would be ideal)
+    // But we'll use a single write instead for this implementation
+    _ = posix.write(fd, responseBuffer[0..pos]) catch |err| {
         log.err("Error writing response to client, err {}", .{err});
     };
+
+    // Update last activity time
+    ClientsMAL.items(.last_activity)[slot] = std.time.milliTimestamp();
+}
+
+// Set socket to non-blocking mode
+fn setNonBlocking(fd: i32) !void {
+    const flags = try posix.fcntl(fd, posix.F.GETFL, 0);
+    _ = try posix.fcntl(fd, posix.F.SETFL, flags | 0x800);
+}
+
+// Clean up idle connections
+fn cleanupIdleConnections() void {
+    const current_time = std.time.milliTimestamp();
+    const idle_timeout_ms = 30 * 1000; // 30 seconds
+
+    for (ClientsMAL.items(.fd), ClientsMAL.items(.last_activity), 0..) |fd, last_activity, i| {
+        if (fd != -1 and (current_time - last_activity) > idle_timeout_ms) {
+            log.debug("Closing idle connection on fd {}", .{fd});
+            disconnectClient(i);
+        }
+    }
 }
 
 pub fn main() !void {
@@ -118,14 +171,24 @@ pub fn main() !void {
         log.err("Error while initializing socket, err {}\n", .{err});
         return VSEConnectionError.SocketInitializationError;
     };
+    defer posix.close(listenSocket);
+
     log.debug("Socket created {}\n", .{listenSocket});
 
+    // Enable reuse address
     const opt: u32 = 1;
     posix.setsockopt(listenSocket, posix.SOL.SOCKET, posix.SO.REUSEADDR, std.mem.asBytes(&opt)) catch |err| {
-        log.err("Error while setting socket options, err {}\n", .{err});
+        log.err("Error while setting socket options REUSEADDR, err {}\n", .{err});
         return VSEConnectionError.SocketInitializationError;
     };
-    log.debug("Socket options set successfully.\n", .{});
+
+    // Enable TCP_NODELAY to disable Nagle's algorithm
+    posix.setsockopt(listenSocket, posix.IPPROTO.TCP, posix.TCP.NODELAY, std.mem.asBytes(&opt)) catch |err| {
+        log.warn("Error setting TCP_NODELAY: {}", .{err});
+    };
+
+    // Make listen socket non-blocking
+    try setNonBlocking(listenSocket);
 
     const serverAddrIn: posix.sockaddr.in = posix.sockaddr.in{
         .port = std.mem.nativeTo(u16, PORT, std.builtin.Endian.big),
@@ -138,13 +201,11 @@ pub fn main() !void {
         @sizeOf(posix.sockaddr.in),
     ) catch |err| {
         log.err("Socket bind failed with err {}\n", .{err});
-        posix.close(listenSocket);
         return VSEConnectionError.SocketBindError;
     };
 
     posix.listen(listenSocket, QUEUE_SIZE) catch |err| {
         log.err("Socket listen failed with err {}", .{err});
-        posix.close(listenSocket);
         return VSEConnectionError.SocketListenError;
     };
 
@@ -153,15 +214,18 @@ pub fn main() !void {
     // 1 extra for listen socket at index 0
     var pollFdArray: [MAX_CONNECTIONS + 1]posix.pollfd = undefined;
 
+    // Monitoring variables
+    var connections_handled: u64 = 0;
+    var requests_handled: u64 = 0;
+    var last_stats_time = std.time.milliTimestamp();
+
     while (true) {
         // Reset poll array for each iteration
-        for (0..(MAX_CONNECTIONS + 1)) |i| {
-            pollFdArray[i] = posix.pollfd{
-                .fd = -1,
-                .events = posix.POLL.IN,
-                .revents = 0,
-            };
-        }
+        @memset(&pollFdArray, posix.pollfd{
+            .fd = -1,
+            .events = posix.POLL.IN,
+            .revents = 0,
+        });
 
         // Set listen socket in poll array
         pollFdArray[0].fd = listenSocket;
@@ -182,14 +246,22 @@ pub fn main() !void {
             }
         }
 
-        // Wait for events (-1 for indefinite timeout)
-        const readyCount = posix.poll(pollFdArray[0..pollCount], -1) catch |err| {
+        // Wait for events with timeout instead of infinite wait
+        const readyCount = posix.poll(pollFdArray[0..pollCount], POLL_TIMEOUT_MS) catch |err| {
             log.err("Error while calling poll, err {}\n", .{err});
             return VSEConnectionError.PosixPollFailed;
         };
 
+        // Periodically clean up idle connections and print stats
+        const current_time = std.time.milliTimestamp();
+        if (current_time - last_stats_time > 10000) { // Every 10 seconds
+            log.info("Stats - Connections: {}, Requests: {}", .{ connections_handled, requests_handled });
+            cleanupIdleConnections();
+            last_stats_time = current_time;
+        }
+
         if (readyCount <= 0) {
-            log.debug("Poll returned {} events", .{readyCount});
+            // Timeout or nothing to do
             continue;
         }
 
@@ -198,26 +270,43 @@ pub fn main() !void {
             var clientAddrIn: posix.sockaddr.in = undefined;
             var clientAddrLen: posix.socklen_t = @sizeOf(posix.sockaddr.in);
 
-            const connectionFd = posix.accept(listenSocket, @as(*posix.sockaddr, @ptrCast(&clientAddrIn)), &clientAddrLen, 0) catch |err| {
-                log.err("Error while accept syscall, err {}", .{err});
-                continue;
-            };
+            // Accept as many connections as possible in one go
+            while (true) {
+                const connectionFd = posix.accept(listenSocket, @as(*posix.sockaddr, @ptrCast(&clientAddrIn)), &clientAddrLen, 0) catch |err| {
+                    if (err == error.WouldBlock) {
+                        // No more connections to accept right now
+                        break;
+                    }
+                    log.err("Error while accept syscall, err {}", .{err});
+                    break;
+                };
 
-            const slot = findFreeSlot() catch |err| {
-                log.err("Error no free slot available for the new connection, err {}", .{err});
-                posix.close(connectionFd);
-                continue;
-            };
+                // Set new socket to non-blocking
+                setNonBlocking(connectionFd) catch |err| {
+                    log.err("Failed to set client socket non-blocking: {}", .{err});
+                    posix.close(connectionFd);
+                    continue;
+                };
 
-            // Store the new connection
-            ClientsMAL.items(.fd)[slot] = connectionFd;
-            ClientsMAL.items(.state)[slot] = ConnectionState.CONNECTED;
+                const slot = findFreeSlot() catch |err| {
+                    log.err("Error no free slot available for the new connection, err {}", .{err});
+                    posix.close(connectionFd);
+                    continue;
+                };
 
-            const ipAddr = getIpAddr(clientAddrIn.addr);
-            log.info("New connection from {}.{}.{}.{}:{} assigned to slot {}", .{ ipAddr[0], ipAddr[1], ipAddr[2], ipAddr[3], std.mem.bigToNative(u16, clientAddrIn.port), slot });
+                // Store the new connection
+                ClientsMAL.items(.fd)[slot] = connectionFd;
+                ClientsMAL.items(.state)[slot] = ConnectionState.CONNECTED;
+                ClientsMAL.items(.last_activity)[slot] = std.time.milliTimestamp();
+
+                const ipAddr = getIpAddr(clientAddrIn.addr);
+                log.debug("New connection from {}.{}.{}.{}:{} assigned to slot {}", .{ ipAddr[0], ipAddr[1], ipAddr[2], ipAddr[3], std.mem.bigToNative(u16, clientAddrIn.port), slot });
+
+                connections_handled += 1;
+            }
         }
 
-        // Handle client data
+        // Handle client data - batch process to reduce loop overhead
         for (pollFdArray[1..pollCount]) |pollFd| {
             const fd = pollFd.fd;
             if (fd == -1 or pollFd.revents == 0) {
@@ -227,7 +316,6 @@ pub fn main() !void {
             // Find which client this is
             const slot = findSlotByFd(fd) catch |err| {
                 log.err("Invalid fd received err {} for fd {}", .{ err, fd });
-                // If we can't find this fd in our clients list, close it
                 posix.close(fd);
                 continue;
             };
@@ -242,9 +330,8 @@ pub fn main() !void {
             // Read data if available
             if (pollFd.revents & posix.POLL.IN != 0) {
                 const bytes_read = posix.read(fd, &ClientsMAL.items(.buffer)[slot]) catch |err| {
-                    // Handle specific read errors
                     switch (err) {
-                        error.WouldBlock => continue, // Non-blocking socket would block
+                        error.WouldBlock => continue,
                         else => {
                             log.err("Error while reading client data, err {}\n", .{err});
                             disconnectClient(slot);
@@ -259,9 +346,14 @@ pub fn main() !void {
                     continue;
                 }
 
-                log.info("Received {} bytes from client {}: {s}", .{ bytes_read, fd, ClientsMAL.items(.buffer)[slot][0..bytes_read] });
+                // Update activity timestamp
+                ClientsMAL.items(.last_activity)[slot] = std.time.milliTimestamp();
+
+                // Only log at debug level to reduce logging overhead
+                log.debug("Received {} bytes from client {}", .{ bytes_read, fd });
 
                 respondClient(slot, bytes_read);
+                requests_handled += 1;
             }
         }
     }
