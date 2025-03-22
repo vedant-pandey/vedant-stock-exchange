@@ -3,7 +3,7 @@ const posix = std.posix;
 const log = std.log.scoped(.main);
 
 const QUEUE_SIZE = 128; // Increased from 10
-const READ_BUFFER_SIZE = 16 * 1024; // Increased from 4K
+const READ_BUFFER_SIZE = 16 * 1024; // Increased from 16K
 const MAX_SOCKETS = 1000 + 1; // One extra for listen socket
 const PORT = 3000;
 const POLL_TIMEOUT_MS = 100; // Add timeout instead of infinite wait
@@ -13,8 +13,6 @@ const STATS_TIMEOUT_MS = 10 * 1000; // 10 seconds
 // Pre-computed HTTP response headers
 const HTTP_RESPONSE_PREFIX = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: ";
 const HTTP_RESPONSE_SUFFIX = "\r\nConnection: keep-alive\r\n\r\n";
-
-pub const log_level = std.log.Level.err;
 
 const ConnectionState = enum {
     NEW,
@@ -234,7 +232,10 @@ fn cycleOfAcceptance(listenSocket: posix.socket_t) !u32 {
             &clientAddrLen,
             0,
         ) catch |err| switch (err) {
-            posix.AcceptError.WouldBlock => break,
+            posix.AcceptError.WouldBlock => {
+                log.debug("No more connections to accept for now", .{});
+                break;
+            },
             else => {
                 log.err("Error while accept syscall, err {}", .{err});
                 break;
@@ -304,7 +305,6 @@ fn cycleOfServing(listenSocket: posix.socket_t) !void {
         }
 
         for (ClientsMAL.items(.pollFd)[1..], 1..) |pollFd, i| {
-            log.debug("pollFd {} at {}\n", .{ pollFd, i });
             const fd = pollFd.fd;
             if (fd < 0 or pollFd.revents == 0) {
                 continue;
