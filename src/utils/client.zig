@@ -1,26 +1,13 @@
 const std = @import("std");
-const log = std.log.scoped(.@"client-utils");
+const log = std.log.scoped(.@"utils/clients");
 const posix = std.posix;
 
 const serverUtils = @import("server.zig");
 const serverTypes = @import("../types.zig");
 const serverConsts = @import("../constants.zig");
 
-pub fn initClientsMAL(clientsMAL: *serverTypes.ClientsMAL, memoryBuffer: []u8) serverTypes.VSEError!void {
+pub inline fn initClientsMAL(clientsMAL: *serverTypes.ClientsMAL, memoryBuffer: []u8) serverTypes.VSEError!void {
     var fba = std.heap.FixedBufferAllocator.init(memoryBuffer);
-
-    log.debug(
-        \\Initialized clients multi array list with size 
-        \\{} bytes client state * {} Max connections = {} bytes, 
-        \\storing in buffer of size {} bytes
-    ,
-        .{
-            @sizeOf(serverTypes.SocketState),
-            serverConsts.MAX_SOCKETS,
-            (@sizeOf(serverTypes.SocketState) * serverConsts.MAX_SOCKETS),
-            memoryBuffer.len,
-        },
-    );
     clientsMAL.setCapacity(fba.allocator(), serverConsts.MAX_SOCKETS) catch |err| {
         log.err("Error while initializing client multi array list, err {}", .{err});
         return serverTypes.VSEError.ClientMultiArrayInitFailed;
@@ -39,7 +26,7 @@ pub fn initClientsMAL(clientsMAL: *serverTypes.ClientsMAL, memoryBuffer: []u8) s
     }
 }
 
-pub fn disconnectClient(clientsMAL: *const serverTypes.ClientsMAL, slot: usize) void {
+pub inline fn disconnectClient(clientsMAL: *const serverTypes.ClientsMAL, slot: usize) void {
     serverUtils.logIpAddr(clientsMAL, "Disconnecting client ", slot);
     posix.close(clientsMAL.items(.pollFd)[slot].fd);
     clientsMAL.items(.pollFd)[slot].fd = ~clientsMAL.items(.pollFd)[slot].fd;
@@ -47,7 +34,7 @@ pub fn disconnectClient(clientsMAL: *const serverTypes.ClientsMAL, slot: usize) 
     clientsMAL.items(.state)[slot] = serverTypes.ConnectionState.DISCONNECTED;
 }
 
-pub fn registerClient(
+pub inline fn registerClient(
     clientsMAL: *serverTypes.ClientsMAL,
     slot: usize,
     connectionFd: posix.socket_t,
@@ -65,8 +52,9 @@ pub fn registerClient(
 }
 
 // Optimized to reduce string formatting overhead
-pub fn respondClient(clientsMAL: *serverTypes.ClientsMAL, slot: usize, bytes_read: usize) void {
+pub inline fn respondClient(clientsMAL: *serverTypes.ClientsMAL, slot: usize, bytes_read: usize) void {
     const fd = clientsMAL.items(.pollFd)[slot].fd;
+    // 
 
     // Pre-allocate a single buffer for headers and content
     var responseBuffer: [serverConsts.READ_BUFFER_SIZE + 256]u8 = undefined;
@@ -90,6 +78,10 @@ pub fn respondClient(clientsMAL: *serverTypes.ClientsMAL, slot: usize, bytes_rea
 
     // Copy message body
     @memcpy(responseBuffer[pos .. pos + bytes_read], clientsMAL.items(.buffer)[slot][0..bytes_read]);
+    log.debug("DATA FROM CLIENT {}/{} bytes", .{
+        bytes_read,
+        clientsMAL.items(.buffer)[slot].len,
+    });
     pos += bytes_read;
 
     // Use writev to send in one syscall (would be ideal)

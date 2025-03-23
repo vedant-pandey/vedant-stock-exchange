@@ -6,12 +6,12 @@ const serverTypes = @import("../types.zig");
 const serverConsts = @import("../constants.zig");
 
 // Set socket to non-blocking mode
-pub fn setNonBlocking(fd: i32) !void {
+pub inline fn setNonBlocking(fd: i32) !void {
     const flags = try posix.fcntl(fd, posix.F.GETFL, 0);
     _ = try posix.fcntl(fd, posix.F.SETFL, flags | 0x800);
 }
 
-pub fn initSocket() !posix.socket_t {
+pub inline fn initSocket() !posix.socket_t {
     const listenSocket = posix.socket(posix.AF.INET, posix.SOCK.STREAM, 0) catch |err| {
         log.err("Error while initializing socket, err {}\n", .{err});
         return serverTypes.VSEError.SocketInitializationError;
@@ -36,7 +36,7 @@ pub fn initSocket() !posix.socket_t {
     return listenSocket;
 }
 
-pub fn bindSocket(listenSocket: posix.socket_t) !void {
+pub inline fn bindSocket(listenSocket: posix.socket_t) !void {
     const serverAddrIn: posix.sockaddr.in = posix.sockaddr.in{
         .port = std.mem.nativeTo(u16, serverConsts.PORT, std.builtin.Endian.big),
         .addr = 0, // INADDR_ANY
