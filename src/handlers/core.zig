@@ -134,7 +134,9 @@ pub inline fn cycleOfServing(clientsMAL: *serverTypes.ClientsMAL, listenSocket: 
                 // Only log at debug level to reduce logging overhead
                 log.debug("Received {} bytes from client {}", .{ bytes_read, fd });
 
-                clientUtils.respondClient(clientsMAL, i, bytes_read);
+                clientUtils.respondClient(clientsMAL, i, bytes_read) catch |err| {
+                    log.err("Error while responding to client, err {}", .{err});
+                };
                 requestsHandled += 1;
             }
         }

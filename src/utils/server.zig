@@ -12,15 +12,15 @@ pub inline fn logIpAddr(ClientsMAL: *const serverTypes.ClientsMAL, msg: []const 
     log.debug("{s} {}.{}.{}.{}:{}", .{ msg, first, second, third, fourth, std.mem.bigToNative(u16, port) });
 }
 
-pub inline fn findFreeSlot(clientsMAL: *serverTypes.ClientsMAL) serverTypes.VSEError!usize {
+pub inline fn findFreeSlot(clientsMAL: *const serverTypes.ClientsMAL) serverTypes.VSE.Error!usize {
     // Use bitmap or free list for faster slot finding
     for (clientsMAL.items(.pollFd), 0..) |pollFd, i| {
         if (pollFd.fd < 0) return i;
     }
-    return serverTypes.VSEError.NoSlotsAvailable;
+    return serverTypes.VSE.Error.NoSlotsAvailable;
 }
 
-pub inline fn findSlotByFd(clientsMAL: *serverTypes.ClientsMAL, fd: i32) serverTypes.VSEError!usize {
+pub inline fn findSlotByFd(clientsMAL: *serverTypes.SocketsMAL, fd: i32) serverTypes.VSE.Error{
     // Consider using a hashmap for O(1) lookup instead of O(n)
     for (clientsMAL.items(.pollFd), 0..) |pollFd, i| {
         if (pollFd.fd == fd) {
@@ -28,5 +28,5 @@ pub inline fn findSlotByFd(clientsMAL: *serverTypes.ClientsMAL, fd: i32) serverT
         }
     }
 
-    return serverTypes.VSEError.InvalidClientFd;
+    return serverTypes.VSE.Error.InvalidClientFd;
 }

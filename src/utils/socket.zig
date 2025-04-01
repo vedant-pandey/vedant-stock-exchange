@@ -14,7 +14,7 @@ pub inline fn setNonBlocking(fd: i32) !void {
 pub inline fn initSocket() !posix.socket_t {
     const listenSocket = posix.socket(posix.AF.INET, posix.SOCK.STREAM, 0) catch |err| {
         log.err("Error while initializing socket, err {}\n", .{err});
-        return serverTypes.VSEError.SocketInitializationError;
+        return serverTypes.VSE.Error.SocketInitializationError;
     };
 
     log.debug("Socket created {}\n", .{listenSocket});
@@ -23,7 +23,7 @@ pub inline fn initSocket() !posix.socket_t {
     const opt: u32 = 1;
     posix.setsockopt(listenSocket, posix.SOL.SOCKET, posix.SO.REUSEADDR, std.mem.asBytes(&opt)) catch |err| {
         log.err("Error while setting socket options REUSEADDR, err {}\n", .{err});
-        return serverTypes.VSEError.SocketInitializationError;
+        return serverTypes.VSE.Error.SocketInitializationError;
     };
 
     // Enable TCP_NODELAY to disable Nagle's algorithm
@@ -48,11 +48,11 @@ pub inline fn bindSocket(listenSocket: posix.socket_t) !void {
         @sizeOf(posix.sockaddr.in),
     ) catch |err| {
         log.err("Socket bind failed with err {}\n", .{err});
-        return serverTypes.VSEError.SocketBindError;
+        return serverTypes.VSE.Error.SocketBindError;
     };
 
     posix.listen(listenSocket, serverConsts.QUEUE_SIZE) catch |err| {
         log.err("Socket listen failed with err {}", .{err});
-        return serverTypes.VSEError.SocketListenError;
+        return serverTypes.VSE.Error.SocketListenError;
     };
 }

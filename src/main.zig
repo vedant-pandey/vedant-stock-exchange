@@ -8,7 +8,7 @@ const serverHandler = @import("handlers/core.zig");
 const serverTypes = @import("types.zig");
 const serverConsts = @import("constants.zig");
 
-pub fn main() serverTypes.VSEError!void {
+pub fn main() serverTypes.VSE.Error!void {
     var clientsMAL = serverTypes.ClientsMAL{};
     var memoryBuffer: [serverConsts.MAX_SOCKETS * @sizeOf(serverTypes.SocketState)]u8 = undefined;
     try clientUtils.initClientsMAL(&clientsMAL, &memoryBuffer);
@@ -19,7 +19,7 @@ pub fn main() serverTypes.VSEError!void {
 
     const listenSocket: posix.socket_t = socketUtils.initSocket() catch |err| {
         log.err("Error while initializing socket, err {}", .{err});
-        return serverTypes.VSEError.SocketInitializationError;
+        return serverTypes.VSE.Error.SocketInitializationError;
     };
     defer posix.close(listenSocket);
 
