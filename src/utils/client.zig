@@ -137,9 +137,35 @@ pub fn respondClient(clientsMAL: *serverTypes.ClientsMAL, slot: usize, bytes_rea
         },
     }
     // TODO: create handlers
+    const file =  try std.fs.cwd().openFile("./index.html", .{});
+    defer file.close();
+    const fileSize = (try file.stat()).size;
+
+    var responseBuffer: [serverConsts.READ_BUFFER_SIZE + 256]u8 = undefined;
+
+    // Format the Content-Length part
+    var lenBuf: [16]u8 = undefined;
+    const lenStr = std.fmt.bufPrint(&lenBuf, "{d}", .{fileSize}) catch return;
+
+    // Copy prefix
+    var pos: usize = 0;
+    @memcpy(responseBuffer[pos .. pos + serverConsts.HTTP_RESPONSE_PREFIX.len], serverConsts.HTTP_RESPONSE_PREFIX);
+    pos += serverConsts.HTTP_RESPONSE_PREFIX.len;
+
+    // Copy content length
+    @memcpy(responseBuffer[pos .. pos + lenStr.len], lenStr);
+    pos += lenStr.len;
+
+    // Copy suffix
+    @memcpy(responseBuffer[pos .. pos + serverConsts.HTTP_RESPONSE_SUFFIX.len], serverConsts.HTTP_RESPONSE_SUFFIX);
+    pos += serverConsts.HTTP_RESPONSE_SUFFIX.len;
+
+    _ = try posix.send(clientsMAL.items(.pollFd)[slot].fd, responseBuffer[0..pos], 0);
+    _ = std.os.linux.sendfile(clientsMAL.items(.pollFd)[slot].fd, file.handle, null, fileSize);
+
 
     // Place holder
-    respondEcho(clientsMAL, slot, bytes_read);
+    // respondEcho(clientsMAL, slot, bytes_read);
 
     // Update last activity time
     clientsMAL.items(.last_activity)[slot] = std.time.milliTimestamp();
