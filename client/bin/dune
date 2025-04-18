@@ -1,0 +1,11 @@
+; (executable
+;  (public_name client)
+;  (name main)
+;  (libraries client))
+
+(executables
+ (modes byte exe)
+ (names main)
+ (libraries bonsai_web client)
+ (preprocess
+  (pps ppx_jane)))
